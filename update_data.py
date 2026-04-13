@@ -103,7 +103,7 @@ def fetch_sse_scale_for_date(date_str: str) -> dict[str, float | None]:
         for code in ETF_TARGETS:
             row = df[df["基金代码"] == code]
             if not row.empty:
-                # fund_etf_scale_sse 已将原始万份值乘以 10000，单位为份
+                # akshare fund_etf_scale_sse 返回的"基金份额"单位为份（原始万份 × 10000）
                 # 除以 1e8 转换为亿份
                 val = _to_float(row["基金份额"].iloc[0])
                 result[code] = val / 1e8 if val is not None else None
@@ -165,15 +165,16 @@ def update_data() -> None:
 
         for code, name in ETF_TARGETS.items():
             etf_series = etf_price_cache.get(code)
-            # 优先使用目标日价格，若为非交易日则向前查找最近交易日价格
+            # 优先使用目标日价格；若目标日非交易日则向前填充最近交易日价格
+            # 注意：若目标日超出可用价格数据范围，此处不填充，保留 None
             etf_price: float | None = None
             if etf_series is not None:
                 if d_str in etf_series.index:
                     etf_price = float(etf_series[d_str])
                 else:
-                    # 查找不超过 d_str 的最近可用价格
+                    # 仅在目标日 ≤ 已有价格数据最新日时前向填充，避免引入未来数据
                     available = etf_series.index[etf_series.index <= d_str]
-                    if len(available) > 0:
+                    if len(available) > 0 and d_str <= etf_series.index.max():
                         etf_price = float(etf_series[available[-1]])
 
             new_data_list.append(
