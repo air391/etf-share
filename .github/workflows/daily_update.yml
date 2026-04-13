@@ -1,0 +1,38 @@
+name: ETF Share Data Daily Update
+
+on:
+  schedule:
+    # 每个工作日北京时间 19:30 运行（UTC 11:30）
+    # 交易所通常在 18:00 前后发布完整的当日份额数据
+    - cron: '30 11 * * 1-5'
+  workflow_dispatch: # 支持手动点击按钮立即触发
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 允许工作流将 CSV 写回仓库
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run incremental data update
+        run: python update_data.py
+
+      - name: Commit and push updated data
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add national_team_data.csv
+          git diff --cached --quiet || git commit -m "Auto Update: $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
