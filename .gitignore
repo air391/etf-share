@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated data (tracked intentionally; listed here as a reminder)
+# national_team_data.csv  <-- keep this tracked, it's the output data
+
+# OS
+.DS_Store
+Thumbs.db
