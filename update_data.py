@@ -137,8 +137,14 @@ def fetch_sse_scale_web(date_str: str) -> dict[str, float | None]:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
 
-        # Parse JSONP: strip callback wrapper and parse JSON
-        json_str = re.sub(r"^[^(]+\(", "", resp.text).rstrip(")")
+        # Parse JSONP: strip the known callback prefix and trailing ")"
+        json_str = resp.text
+        prefix = f"{callback}("
+        if json_str.startswith(prefix):
+            json_str = json_str[len(prefix):]
+        else:
+            json_str = re.sub(r"^[^(]+\(", "", json_str)
+        json_str = json_str.rstrip(")")
         data = json.loads(json_str)
 
         page_help = data.get("pageHelp", {})
