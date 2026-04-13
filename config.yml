@@ -1,7 +1,7 @@
 # ETF 数据采集配置
 
 # 开始采集日期（格式 YYYYMMDD）
-start_date: "20260101"
+start_date: "20230101"
 
 # 采集时间间隔（天）
 interval_days: 7

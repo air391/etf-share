@@ -1,7 +1,7 @@
 """
 ETF Share Incremental Updater
 =============================
-追踪"国家队"（中央汇金、证金公司）核心宽基ETF份额动向。
+追踪核心宽基ETF份额动向。
 
 数据来源：
   上交所 ETF 份额：akshare fund_etf_scale_sse（仅上交所）
@@ -131,6 +131,14 @@ def update_data() -> None:
     if os.path.exists(DATA_FILE):
         df_old = pd.read_csv(DATA_FILE, dtype={"基金代码": str, "日期": str})
         df_old["日期"] = df_old["日期"].astype(str)
+
+        # 找出所有 ETF 份额均缺失的日期，将其从已有数据中移除并重新获取
+        all_missing = df_old.groupby("日期")["基金份额(亿份)"].apply(lambda s: s.isna().all())
+        bad_dates = set(all_missing[all_missing].index)
+        if bad_dates:
+            print(f"发现 {len(bad_dates)} 个份额数据缺失的日期，将重新获取：{sorted(bad_dates)}")
+            df_old = df_old[~df_old["日期"].isin(bad_dates)].copy()
+
         existing_dates = set(df_old["日期"].unique())
     else:
         df_old = pd.DataFrame()
@@ -162,6 +170,11 @@ def update_data() -> None:
     for i, d_str in enumerate(dates_to_fetch, 1):
         print(f"\n[{i}/{total}] 获取 {d_str} 份额数据...")
         scale_data = fetch_sse_scale_for_date(d_str)
+
+        # 若当日所有 ETF 份额均无数据（非交易日或接口异常），跳过该日期
+        if not scale_data or all(v is None for v in scale_data.values()):
+            print(f"    ↳ 无有效份额数据，跳过 {d_str}")
+            continue
 
         for code, name in ETF_TARGETS.items():
             etf_series = etf_price_cache.get(code)
