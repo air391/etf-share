@@ -60,8 +60,8 @@ def generate_pages() -> None:
         rows=2,
         cols=1,
         subplot_titles=(
-            "国家队 ETF 基金份额（亿份）— 堆叠面积图",
-            "国家队 ETF 收盘价走势",
+            "ETF 基金份额（亿份）— 堆叠面积图",
+            "ETF 收盘价走势",
         ),
         shared_xaxes=True,
         vertical_spacing=0.12,
@@ -115,7 +115,7 @@ def generate_pages() -> None:
     # ------------------------------------------------------------------
     fig.update_layout(
         title=dict(
-            text="国家队核心 ETF 监控（上交所）",
+            text="核心 ETF 监控（上交所）",
             font=dict(size=20),
             x=0.5,
         ),
@@ -148,7 +148,7 @@ def generate_pages() -> None:
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>国家队 ETF 监控</title>
+  <title>核心 ETF 监控</title>
   <style>
     body {{ font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
             margin: 0; padding: 20px; background: #f5f5f5; }}
@@ -161,7 +161,7 @@ def generate_pages() -> None:
 </head>
 <body>
   <div class="container">
-    <h1>国家队核心 ETF 监控</h1>
+    <h1>核心 ETF 监控</h1>
     <div class="meta">
       监控标的：{" | ".join(f"{c} {n}" for c, n in ETF_TARGETS.items())}
       &nbsp;&nbsp;|&nbsp;&nbsp;数据最新日期：{last_update}
@@ -183,10 +183,10 @@ def _write_no_data_page() -> None:
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>国家队 ETF 监控</title>
+  <title>核心 ETF 监控</title>
 </head>
 <body>
-  <h1>国家队核心 ETF 监控</h1>
+  <h1>核心 ETF 监控</h1>
   <p>暂无数据，请等待首次数据采集完成。</p>
 </body>
 </html>
