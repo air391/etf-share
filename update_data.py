@@ -17,12 +17,15 @@ ETF Share Incremental Updater
   python update_data.py
 """
 
+import json
 import os
+import re
 import time
 from datetime import datetime, date, timedelta
 
 import akshare as ak
 import pandas as pd
+import requests
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -91,27 +94,131 @@ def fetch_etf_price_cache(start_date_str: str, end_date_str: str) -> dict[str, p
     return cache
 
 
+def fetch_sse_scale_web(date_str: str) -> dict[str, float | None]:
+    """
+    直接调用上交所查询接口（query.sse.com.cn）获取指定日期的ETF份额数据。
+    当 akshare 接口连续失败时作为备用数据源。
+    date_str: YYYYMMDD 格式
+    返回：{ETF代码: 份额(亿份)}。若当日无数据返回空字典。
+    """
+    date_formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
+            "Gecko/20100101 Firefox/149.0"
+        ),
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://www.sse.com.cn/",
+        "Connection": "keep-alive",
+    }
+
+    result: dict[str, float | None] = {}
+    page = 1
+    total_pages = 1
+    page_size = 100
+
+    while page <= total_pages:
+        timestamp = int(time.time() * 1000)
+        callback = f"jsonpCallback{timestamp}"
+        url = (
+            f"https://query.sse.com.cn/commonQuery.do"
+            f"?jsonCallBack={callback}"
+            f"&isPagination=true"
+            f"&pageHelp.pageSize={page_size}"
+            f"&pageHelp.pageNo={page}"
+            f"&pageHelp.beginPage={page}"
+            f"&pageHelp.cacheSize=1"
+            f"&pageHelp.endPage={page}"
+            f"&sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L"
+            f"&STAT_DATE={date_formatted}"
+            f"&_={timestamp}"
+        )
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+
+        # Parse JSONP: strip the known callback prefix and trailing ")"
+        json_str = resp.text
+        prefix = f"{callback}("
+        if json_str.startswith(prefix):
+            json_str = json_str[len(prefix):]
+        else:
+            json_str = re.sub(r"^[^(]+\(", "", json_str)
+        json_str = json_str.rstrip(")")
+        data = json.loads(json_str)
+
+        page_help = data.get("pageHelp", {})
+        total_pages = int(page_help.get("pageCount", 1))
+        rows = page_help.get("data", [])
+
+        if not rows:
+            break
+
+        for row in rows:
+            code = str(row.get("SEC_CODE", "")).zfill(6)
+            if code in ETF_TARGETS:
+                val = _to_float(row.get("TOT_VOL"))
+                # TOT_VOL unit is 万份; divide by 10000 to get 亿份
+                result[code] = val / 1e4 if val is not None else None
+
+        page += 1
+        time.sleep(0.2)
+
+    # Fill None for target codes not found in the response
+    for code in ETF_TARGETS:
+        if code not in result:
+            result[code] = None
+
+    return result
+
+
+# Track consecutive akshare failures so we can switch to the web fallback
+# after _AKSHARE_FAIL_THRESHOLD consecutive errors.
+_consecutive_akshare_failures: int = 0
+_AKSHARE_FAIL_THRESHOLD: int = 3
+
+
 def fetch_sse_scale_for_date(date_str: str) -> dict[str, float | None]:
     """
     调用 akshare fund_etf_scale_sse 获取指定日期的上交所 ETF 份额数据。
+    若 akshare 连续失败达到阈值，切换为直接调用上交所网页接口。
     返回：{ETF代码: 份额(亿份)}。若该日无数据（如非交易日）返回空字典。
     """
-    try:
-        df = ak.fund_etf_scale_sse(date=date_str)
-        df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
-        result: dict[str, float | None] = {}
-        for code in ETF_TARGETS:
-            row = df[df["基金代码"] == code]
-            if not row.empty:
-                # akshare fund_etf_scale_sse 返回的"基金份额"单位为份（原始万份 × 10000）
-                # 除以 1e8 转换为亿份
-                val = _to_float(row["基金份额"].iloc[0])
-                result[code] = val / 1e8 if val is not None else None
+    global _consecutive_akshare_failures
+
+    if _consecutive_akshare_failures < _AKSHARE_FAIL_THRESHOLD:
+        try:
+            df = ak.fund_etf_scale_sse(date=date_str)
+            df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
+            result: dict[str, float | None] = {}
+            for code in ETF_TARGETS:
+                row = df[df["基金代码"] == code]
+                if not row.empty:
+                    # akshare fund_etf_scale_sse 返回的"基金份额"单位为份（原始万份 × 10000）
+                    # 除以 1e8 转换为亿份
+                    val = _to_float(row["基金份额"].iloc[0])
+                    result[code] = val / 1e8 if val is not None else None
+                else:
+                    result[code] = None
+            _consecutive_akshare_failures = 0
+            return result
+        except Exception as exc:
+            _consecutive_akshare_failures += 1
+            print(f"    ⚠ akshare获取上交所份额数据失败 ({date_str}): {exc}")
+            if _consecutive_akshare_failures >= _AKSHARE_FAIL_THRESHOLD:
+                print(
+                    f"    ↳ akshare已连续失败 {_consecutive_akshare_failures} 次，"
+                    f"切换为上交所网页接口"
+                )
             else:
-                result[code] = None
-        return result
+                print(f"    ↳ 尝试上交所网页接口备用...")
+    else:
+        print(f"    ℹ 使用上交所网页接口获取 {date_str} 份额数据")
+
+    try:
+        return fetch_sse_scale_web(date_str)
     except Exception as exc:
-        print(f"    ⚠ 获取上交所份额数据失败 ({date_str}): {exc}")
+        print(f"    ⚠ 上交所网页接口也失败 ({date_str}): {exc}")
         return {}
 
 
