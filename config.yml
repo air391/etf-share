@@ -1,0 +1,17 @@
+# ETF 数据采集配置
+
+# 开始采集日期（格式 YYYYMMDD）
+start_date: "20260101"
+
+# 采集时间间隔（天）
+interval_days: 7
+
+# 数据输出文件路径
+data_file: "data/etf_scale.csv"
+
+# 监控的上交所 ETF（4只）：代码 → 名称
+etf_targets:
+  "510050": "上证50ETF华夏"
+  "510300": "沪深300ETF华泰柏瑞"
+  "510310": "沪深300ETF易方达"
+  "510500": "中证500ETF南方"
