@@ -124,7 +124,8 @@ def fetch_sse_scale(date_str: str) -> dict[str, dict]:
         df_filtered = df[df["基金代码"].isin(_SSE_CODES)]
         for _, row in df_filtered.iterrows():
             code = str(row["基金代码"])
-            current = _to_float(row.get("当日份额"))
+            # 当前版本 akshare 接口只返回 "基金份额"，不再提供 "当日份额"/"前一日份额"
+            current = _to_float(row.get("当日份额") or row.get("基金份额"))
             prev = _to_float(row.get("前一日份额"))
             result[code] = {
                 "当日份额": current,
@@ -138,17 +139,19 @@ def fetch_sse_scale(date_str: str) -> dict[str, dict]:
 
 def fetch_szse_scale(date_str: str) -> dict[str, dict]:
     """
-    从深交所接口获取指定日期所有深交所 ETF 的份额数据。
+    从深交所接口获取深交所 ETF 的份额数据（当前版本接口不支持按日期查询，返回最新数据）。
     返回：{ETF代码: {"当日份额": float, "前一日份额": float, "份额变动": float}}
     """
     result: dict[str, dict] = {}
     try:
-        df = ak.fund_etf_scale_szse(date=date_str)
+        # 当前 akshare 版本 fund_etf_scale_szse() 不接受 date 参数，只返回当前最新数据
+        df = ak.fund_etf_scale_szse()
         df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
         df_filtered = df[df["基金代码"].isin(_SZSE_CODES)]
         for _, row in df_filtered.iterrows():
             code = str(row["基金代码"])
-            current = _to_float(row.get("当日份额"))
+            # 当前接口只提供 "基金份额"，不再提供 "当日份额"/"前一日份额"
+            current = _to_float(row.get("当日份额") or row.get("基金份额"))
             prev = _to_float(row.get("前一日份额"))
             result[code] = {
                 "当日份额": current,
