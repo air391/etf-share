@@ -26,6 +26,7 @@ from datetime import datetime, date
 
 import akshare as ak
 import pandas as pd
+import requests
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -112,43 +113,79 @@ def fetch_etf_price_cache(start_date_str: str, end_date_str: str) -> dict[str, p
     return cache
 
 
-def fetch_sse_scale(date_str: str) -> dict[str, dict]:
+_SSE_SCALE_URL = "https://query.sse.com.cn/commonQuery.do"
+_SSE_SCALE_HEADERS = {
+    "Referer": "https://www.sse.com.cn/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/88.0.4324.150 Safari/537.36",
+}
+
+
+def fetch_sse_scale_cache(
+    target_days: list, prev_date_str: str | None = None
+) -> dict[str, dict[str, float | None]]:
     """
-    从上交所接口获取指定日期所有上交所 ETF 的份额数据。
-    返回：{ETF代码: {"当日份额": float, "前一日份额": float, "份额变动": float}}
+    直接调用上交所接口，批量获取目标日期的 SSE ETF 份额数据（支持历史查询）。
+    同时额外获取 prev_date_str（第一个目标日的前一交易日），以便计算首日份额变动量。
+    接口：https://query.sse.com.cn/commonQuery.do (COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L)
+    返回：{日期字符串: {ETF代码: 份额(亿份)}}
     """
-    result: dict[str, dict] = {}
-    try:
-        df = ak.fund_etf_scale_sse(date=date_str)
-        df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
-        df_filtered = df[df["基金代码"].isin(_SSE_CODES)]
-        for _, row in df_filtered.iterrows():
-            code = str(row["基金代码"])
-            current = _to_float(row.get("当日份额"))
-            prev = _to_float(row.get("前一日份额"))
-            result[code] = {
-                "当日份额": current,
-                "前一日份额": prev,
-                "份额变动": (current - prev) if (current is not None and prev is not None) else None,
-            }
-    except Exception as exc:
-        print(f"    ⚠ 获取上交所份额数据失败 ({date_str}): {exc}")
-    return result
+    dates_to_fetch: list[str] = []
+    if prev_date_str:
+        dates_to_fetch.append(prev_date_str)
+    for d in target_days:
+        dates_to_fetch.append(d.strftime("%Y%m%d"))
+
+    cache: dict[str, dict[str, float | None]] = {}
+    total = len(dates_to_fetch)
+    for idx, d_str in enumerate(dates_to_fetch, 1):
+        print(f"  [SSE份额 {idx}/{total}] {d_str}")
+        stat_date = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
+        params = {
+            "isPagination": "true",
+            "pageHelp.pageSize": "10000",
+            "pageHelp.pageNo": "1",
+            "pageHelp.beginPage": "1",
+            "pageHelp.cacheSize": "1",
+            "pageHelp.endPage": "1",
+            "sqlId": "COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L",
+            "STAT_DATE": stat_date,
+        }
+        try:
+            r = requests.get(
+                _SSE_SCALE_URL, params=params, headers=_SSE_SCALE_HEADERS, timeout=15
+            )
+            data = r.json()
+            day_data: dict[str, float | None] = {}
+            for record in data.get("result", []):
+                code = str(record.get("SEC_CODE", "")).zfill(6)
+                if code in _SSE_CODES:
+                    # TOT_VOL: raw value from SSE API, in 万份 (10,000 shares)
+                    # Divide by 10,000 to convert to 亿份 (100 million shares)
+                    tot_vol = _to_float(record.get("TOT_VOL"))
+                    day_data[code] = tot_vol / 10000.0 if tot_vol is not None else None
+            cache[d_str] = day_data
+        except Exception as exc:
+            print(f"    ⚠ 获取上交所份额数据失败 ({d_str}): {exc}")
+            cache[d_str] = {}
+        time.sleep(0.5)
+    return cache
 
 
 def fetch_szse_scale(date_str: str) -> dict[str, dict]:
     """
-    从深交所接口获取指定日期所有深交所 ETF 的份额数据。
+    从深交所接口获取深交所 ETF 的份额数据（接口不支持历史查询，仅返回当前最新数据）。
     返回：{ETF代码: {"当日份额": float, "前一日份额": float, "份额变动": float}}
     """
     result: dict[str, dict] = {}
     try:
-        df = ak.fund_etf_scale_szse(date=date_str)
+        df = ak.fund_etf_scale_szse()
         df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
         df_filtered = df[df["基金代码"].isin(_SZSE_CODES)]
         for _, row in df_filtered.iterrows():
             code = str(row["基金代码"])
-            current = _to_float(row.get("当日份额"))
+            # 当前接口只提供 "基金份额"，不提供前一日数据
+            current = _to_float(row.get("当日份额") or row.get("基金份额"))
             prev = _to_float(row.get("前一日份额"))
             result[code] = {
                 "当日份额": current,
@@ -156,7 +193,6 @@ def fetch_szse_scale(date_str: str) -> dict[str, dict]:
                 "份额变动": (current - prev) if (current is not None and prev is not None) else None,
             }
     except AttributeError:
-        # fund_etf_scale_szse 在当前 akshare 版本中不存在，静默跳过
         pass
     except Exception as exc:
         print(f"    ⚠ 获取深交所份额数据失败 ({date_str}): {exc}")
@@ -224,19 +260,57 @@ def update_data() -> None:
     etf_price_cache = fetch_etf_price_cache(start_date_str, today_str)
 
     # ------------------------------------------------------------------
+    # 3b. 预取上交所 ETF 历史份额（含前一交易日，用于计算首日变动量）
+    # ------------------------------------------------------------------
+    all_trade_dates = df_cal.loc[df_cal["trade_date"] <= today, "trade_date"].tolist()
+    try:
+        first_idx = all_trade_dates.index(target_days[0])
+        prev_day_str: str | None = (
+            all_trade_dates[first_idx - 1].strftime("%Y%m%d")
+            if first_idx > 0
+            else None
+        )
+    except ValueError:
+        prev_day_str = None
+
+    print("\n正在批量获取上交所ETF历史份额数据...")
+    sse_scale_cache = fetch_sse_scale_cache(target_days, prev_day_str)
+
+    # ------------------------------------------------------------------
     # 4. 逐日获取 ETF 份额数据并合并
     # ------------------------------------------------------------------
     new_data_list: list[dict] = []
-    print("\n正在逐日获取ETF份额数据...")
+    print("\n正在逐日汇总数据...")
 
-    for i, d in enumerate(target_days, 1):
+    last_day_str = target_days[-1].strftime("%Y%m%d")
+    szse_scale_today = fetch_szse_scale(last_day_str)
+
+    for i, d in enumerate(target_days):
         d_str = d.strftime("%Y%m%d")
-        print(f"  [{i}/{len(target_days)}] {d_str}")
+        print(f"  [{i + 1}/{len(target_days)}] {d_str}")
 
-        # 分别从两个交易所拉取份额数据
+        # SSE ETFs: 从预取缓存中获取当日和前一日份额，计算变动
+        current_sse = sse_scale_cache.get(d_str, {})
+        prev_d_str = (
+            prev_day_str if i == 0 and prev_day_str
+            else target_days[i - 1].strftime("%Y%m%d") if i > 0
+            else None
+        )
+        prev_sse = sse_scale_cache.get(prev_d_str, {}) if prev_d_str else {}
+
         scale_data: dict[str, dict] = {}
-        scale_data.update(fetch_sse_scale(d_str))
-        scale_data.update(fetch_szse_scale(d_str))
+        for code in _SSE_CODES:
+            current = current_sse.get(code)
+            prev = prev_sse.get(code)
+            scale_data[code] = {
+                "当日份额": current,
+                "前一日份额": prev,
+                "份额变动": (current - prev) if (current is not None and prev is not None) else None,
+            }
+
+        # SZSE ETFs: 深交所接口不支持历史查询，仅最近交易日填充份额数据
+        if d_str == last_day_str:
+            scale_data.update(szse_scale_today)
 
         # 为每只 ETF 构建一条记录
         for code, info in ETF_TARGETS.items():
@@ -272,8 +346,6 @@ def update_data() -> None:
                     "对应指数收盘价": idx_price,
                 }
             )
-
-        time.sleep(0.5)
 
     if not new_data_list:
         print("\n未获取到有效的新数据（数据源可能尚未更新）。")
