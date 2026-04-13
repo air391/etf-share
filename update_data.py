@@ -46,9 +46,9 @@ ETF_TARGETS: dict[str, dict] = {
     "510300": {"name": "沪深300ETF华泰柏瑞","index": "sh000300"},
 }
 
-# 沪市（上交所）ETF 代码集合
-_SSE_CODES = {c for c in ETF_TARGETS if not c.startswith("1")}
-# 深市（深交所）ETF 代码集合
+# 沪市（上交所）ETF 代码集合：以 "5" 开头的六位代码（如 510xxx）
+_SSE_CODES = {c for c in ETF_TARGETS if c.startswith("5")}
+# 深市（深交所）ETF 代码集合：以 "1" 开头的六位代码（如 159xxx）
 _SZSE_CODES = {c for c in ETF_TARGETS if c.startswith("1")}
 
 
@@ -155,9 +155,11 @@ def fetch_szse_scale(date_str: str) -> dict[str, dict]:
                 "前一日份额": prev,
                 "份额变动": (current - prev) if (current is not None and prev is not None) else None,
             }
-    except Exception:
-        # fund_etf_scale_szse 在部分 akshare 版本中可能不存在，静默跳过
+    except AttributeError:
+        # fund_etf_scale_szse 在当前 akshare 版本中不存在，静默跳过
         pass
+    except Exception as exc:
+        print(f"    ⚠ 获取深交所份额数据失败 ({date_str}): {exc}")
     return result
 
 
