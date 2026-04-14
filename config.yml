@@ -4,7 +4,7 @@
 start_date: "20230104"
 
 # 采集时间间隔（天）
-interval_days: 7
+interval_days: 3
 
 # 数据输出文件路径
 data_file: "data/etf_scale.csv"
