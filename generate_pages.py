@@ -2,8 +2,8 @@
 GitHub Pages 静态页面生成器
 ===========================
 从 data/etf_scale.csv 读取数据，生成包含以下图表的 docs/index.html：
-  1. 四只 ETF 基金份额的堆叠面积图（亿份）
-  2. 四只 ETF 的价格走势折线图
+    1. 四只 ETF 基金份额的堆叠面积图（左轴，亿份）
+    2. 四只 ETF 的相对价格走势（右轴，价格/各自最大值）
 
 用法：
   python generate_pages.py
@@ -57,15 +57,10 @@ def generate_pages() -> None:
     # 构建图表
     # ------------------------------------------------------------------
     fig = make_subplots(
-        rows=2,
+        rows=1,
         cols=1,
-        subplot_titles=(
-            "ETF 基金份额（亿份）— 堆叠面积图",
-            "ETF 收盘价走势",
-        ),
-        shared_xaxes=True,
-        vertical_spacing=0.12,
-        row_heights=[0.55, 0.45],
+        subplot_titles=("ETF 基金份额与相对价格走势",),
+        specs=[[{"secondary_y": True}]],
     )
 
     codes = list(ETF_TARGETS.keys())
@@ -86,28 +81,39 @@ def generate_pages() -> None:
                 line=dict(color=color, width=1.5),
                 hovertemplate="%{x|%Y-%m-%d}<br>%{y:.2f} 亿份<extra>" + name + "</extra>",
             ),
-            row=1,
-            col=1,
+            row=1, col=1, secondary_y=False,
         )
 
-    # 图2：价格折线图
+    # 图2：相对价格折线图（价格 / 各自最大值）
     for idx, code in enumerate(codes):
         sub = df[df["基金代码"] == code].copy()
+        sub = sub.dropna(subset=["ETF收盘价"])
         name = ETF_TARGETS[code]
         color = COLORS[idx % len(COLORS)]
+
+        if sub.empty:
+            continue
+
+        max_price = sub["ETF收盘价"].max()
+        if pd.isna(max_price) or max_price <= 0:
+            continue
+
+        sub["相对价格"] = sub["ETF收盘价"] / max_price
         fig.add_trace(
             go.Scatter(
                 x=sub["日期"],
-                y=sub["ETF收盘价"],
-                name=name,
+                y=sub["相对价格"],
+                name=f"{name}（相对价格）",
                 mode="lines+markers",
                 marker=dict(size=4),
-                line=dict(color=color, width=1.5),
-                showlegend=False,
-                hovertemplate="%{x|%Y-%m-%d}<br>收盘价 ¥%{y:.4f}<extra>" + name + "</extra>",
+                line=dict(color=color, width=1.5, dash="dot"),
+                hovertemplate=(
+                    "%{x|%Y-%m-%d}<br>相对价格 %{y:.4f}"
+                    f"<br>归一化基准(最大值): {max_price:.4f}"
+                    "<extra>" + name + "</extra>"
+                ),
             ),
-            row=2,
-            col=1,
+            row=1, col=1, secondary_y=True,
         )
 
     # ------------------------------------------------------------------
@@ -119,7 +125,7 @@ def generate_pages() -> None:
             font=dict(size=20),
             x=0.5,
         ),
-        height=800,
+        height=680,
         hovermode="x unified",
         legend=dict(
             orientation="h",
@@ -133,9 +139,10 @@ def generate_pages() -> None:
         paper_bgcolor="white",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#eeeeee")
-    fig.update_yaxes(showgrid=True, gridcolor="#eeeeee")
-    fig.update_yaxes(title_text="亿份", row=1, col=1)
-    fig.update_yaxes(title_text="价格 (元)", row=2, col=1)
+    fig.update_yaxes(showgrid=True, gridcolor="#eeeeee", secondary_y=False)
+    fig.update_yaxes(showgrid=False, secondary_y=True)
+    fig.update_yaxes(title_text="基金份额 (亿份)", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="相对价格 (价格/各自最大值)", row=1, col=1, secondary_y=True)
 
     # ------------------------------------------------------------------
     # 写出 HTML

@@ -20,12 +20,12 @@ ETF Share Incremental Updater
 import json
 import os
 import re
+import subprocess
 import time
 from datetime import datetime, date, timedelta
 
 import akshare as ak
 import pandas as pd
-import requests
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -70,28 +70,39 @@ def get_all_target_dates() -> list[str]:
     return dates
 
 
-def fetch_etf_price_cache(start_date_str: str, end_date_str: str) -> dict[str, pd.Series]:
+def fetch_etf_price_cache(dates: list[str]) -> dict[str, pd.Series]:
     """
-    批量拉取所有 ETF 的历史收盘价（东方财富接口），以字典形式缓存。
-    返回：{ETF代码: pd.Series(收盘价, index=日期字符串 YYYYMMDD)}
+    按日期列表拉取目标 ETF 的单位净值（同花顺 fund_etf_category_ths 接口）。
+    对大型指数 ETF，单位净值与场内收盘价偏差极小（套利机制保证），可直接替代。
+    返回：{ETF代码: pd.Series(单位净值, index=日期字符串 YYYYMMDD)}
     """
-    cache: dict[str, pd.Series] = {}
-    for code in ETF_TARGETS:
-        print(f"  获取ETF行情 {code} ({ETF_TARGETS[code]}) ...")
-        try:
-            df = ak.fund_etf_hist_em(
-                symbol=code,
-                period="daily",
-                start_date=start_date_str,
-                end_date=end_date_str,
-                adjust="",
-            )
-            df["date"] = pd.to_datetime(df["日期"]).dt.strftime("%Y%m%d")
-            cache[code] = df.set_index("date")["收盘"]
-        except Exception as exc:
-            print(f"    ⚠ 获取ETF {code} 行情失败: {exc}")
-        time.sleep(0.5)
-    return cache
+    # {code: {date_str: price}}
+    price_map: dict[str, dict[str, float]] = {code: {} for code in ETF_TARGETS}
+
+    total = len(dates)
+    for idx, d_str in enumerate(dates, 1):
+        print(f"  [{idx}/{total}] 获取 {d_str} ETF净值...")
+        for attempt in range(1, 4):
+            try:
+                df = ak.fund_etf_category_ths(symbol="ETF", date=d_str)
+                df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
+                for code in ETF_TARGETS:
+                    row = df[df["基金代码"] == code]
+                    if not row.empty:
+                        val = _to_float(row["当前-单位净值"].iloc[0])
+                        if val is not None:
+                            price_map[code][d_str] = val
+                break
+            except Exception as exc:
+                print(
+                    f"    ⚠ 获取ETF净值失败 ({d_str}) "
+                    f"[第 {attempt}/3 次]: {type(exc).__name__}: {exc}"
+                )
+                if attempt < 3:
+                    time.sleep(0.8)
+        time.sleep(0.3)
+
+    return {code: pd.Series(price_map[code]) for code in ETF_TARGETS}
 
 
 def fetch_sse_scale_web(date_str: str) -> dict[str, float | None]:
@@ -102,16 +113,79 @@ def fetch_sse_scale_web(date_str: str) -> dict[str, float | None]:
     返回：{ETF代码: 份额(亿份)}。若当日无数据返回空字典。
     """
     date_formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
-            "Gecko/20100101 Firefox/149.0"
-        ),
-        "Accept": "*/*",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://www.sse.com.cn/",
-        "Connection": "keep-alive",
-    }
+    sse_cookie = os.getenv("SSE_COOKIE", "").strip()
+
+    def _build_page_url(page_no: int, page_size: int, ts: int, cb: str) -> str:
+        return (
+            "https://query.sse.com.cn/commonQuery.do"
+            f"?jsonCallBack={cb}"
+            "&isPagination=true"
+            f"&pageHelp.pageSize={page_size}"
+            f"&pageHelp.pageNo={page_no}"
+            f"&pageHelp.beginPage={page_no}"
+            "&pageHelp.cacheSize=1"
+            f"&pageHelp.endPage={page_no}"
+            "&sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L"
+            f"&STAT_DATE={date_formatted}"
+            f"&_={ts}"
+        )
+
+    def _parse_jsonp(text: str) -> dict:
+        # 兼容 callbackName({...}) 与前后空白字符
+        m = re.search(r"^[^(]+\((.*)\)\s*$", text, flags=re.S)
+        if not m:
+            raise ValueError("响应不是有效 JSONP")
+        return json.loads(m.group(1))
+
+    def _fetch_page_with_curl(page_no: int, page_size: int) -> dict:
+        ts = int(time.time() * 1000)
+        cb = f"jsonpCallback{ts}"
+        url = _build_page_url(page_no, page_size, ts, cb)
+
+        cmd = [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--compressed",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "1",
+            "--retry-all-errors",
+            url,
+            "-H",
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0",
+            "-H",
+            "Accept: */*",
+            "-H",
+            "Accept-Language: zh-CN,zh;q=0.9,zh-TW;q=0.8,zh-HK;q=0.7,en-US;q=0.6,en;q=0.5",
+            "-H",
+            "Accept-Encoding: gzip, deflate",
+            "-H",
+            "Referer: https://www.sse.com.cn/",
+            "-H",
+            "Connection: keep-alive",
+            "-H",
+            "Sec-Fetch-Dest: script",
+            "-H",
+            "Sec-Fetch-Mode: no-cors",
+            "-H",
+            "Sec-Fetch-Site: same-site",
+            "-H",
+            "Pragma: no-cache",
+            "-H",
+            "Cache-Control: no-cache",
+        ]
+        if sse_cookie:
+            cmd += ["-H", f"Cookie: {sse_cookie}"]
+
+        completed = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return _parse_jsonp(completed.stdout)
 
     result: dict[str, float | None] = {}
     page = 1
@@ -119,33 +193,7 @@ def fetch_sse_scale_web(date_str: str) -> dict[str, float | None]:
     page_size = 100
 
     while page <= total_pages:
-        timestamp = int(time.time() * 1000)
-        callback = f"jsonpCallback{timestamp}"
-        url = (
-            f"https://query.sse.com.cn/commonQuery.do"
-            f"?jsonCallBack={callback}"
-            f"&isPagination=true"
-            f"&pageHelp.pageSize={page_size}"
-            f"&pageHelp.pageNo={page}"
-            f"&pageHelp.beginPage={page}"
-            f"&pageHelp.cacheSize=1"
-            f"&pageHelp.endPage={page}"
-            f"&sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L"
-            f"&STAT_DATE={date_formatted}"
-            f"&_={timestamp}"
-        )
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-
-        # Parse JSONP: strip the known callback prefix and trailing ")"
-        json_str = resp.text
-        prefix = f"{callback}("
-        if json_str.startswith(prefix):
-            json_str = json_str[len(prefix):]
-        else:
-            json_str = re.sub(r"^[^(]+\(", "", json_str)
-        json_str = json_str.rstrip(")")
-        data = json.loads(json_str)
+        data = _fetch_page_with_curl(page, page_size)
 
         page_help = data.get("pageHelp", {})
         total_pages = int(page_help.get("pageCount", 1))
@@ -175,7 +223,8 @@ def fetch_sse_scale_web(date_str: str) -> dict[str, float | None]:
 # Track consecutive akshare failures so we can switch to the web fallback
 # after _AKSHARE_FAIL_THRESHOLD consecutive errors.
 _consecutive_akshare_failures: int = 0
-_AKSHARE_FAIL_THRESHOLD: int = 3
+_AKSHARE_FAIL_THRESHOLD: int = 1
+_AKSHARE_RETRY_PER_DATE: int = 3
 
 
 def fetch_sse_scale_for_date(date_str: str) -> dict[str, float | None]:
@@ -187,31 +236,36 @@ def fetch_sse_scale_for_date(date_str: str) -> dict[str, float | None]:
     global _consecutive_akshare_failures
 
     if _consecutive_akshare_failures < _AKSHARE_FAIL_THRESHOLD:
-        try:
-            df = ak.fund_etf_scale_sse(date=date_str)
-            df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
-            result: dict[str, float | None] = {}
-            for code in ETF_TARGETS:
-                row = df[df["基金代码"] == code]
-                if not row.empty:
-                    # akshare fund_etf_scale_sse 返回的"基金份额"单位为份（原始万份 × 10000）
-                    # 除以 1e8 转换为亿份
-                    val = _to_float(row["基金份额"].iloc[0])
-                    result[code] = val / 1e8 if val is not None else None
-                else:
-                    result[code] = None
-            _consecutive_akshare_failures = 0
-            return result
-        except Exception as exc:
-            _consecutive_akshare_failures += 1
-            print(f"    ⚠ akshare获取上交所份额数据失败 ({date_str}): {exc}")
-            if _consecutive_akshare_failures >= _AKSHARE_FAIL_THRESHOLD:
+        for attempt in range(1, _AKSHARE_RETRY_PER_DATE + 1):
+            try:
+                df = ak.fund_etf_scale_sse(date=date_str)
+                df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
+                result: dict[str, float | None] = {}
+                for code in ETF_TARGETS:
+                    row = df[df["基金代码"] == code]
+                    if not row.empty:
+                        # akshare fund_etf_scale_sse 返回的"基金份额"单位为份（原始万份 × 10000）
+                        # 除以 1e8 转换为亿份
+                        val = _to_float(row["基金份额"].iloc[0])
+                        result[code] = val / 1e8 if val is not None else None
+                    else:
+                        result[code] = None
+                _consecutive_akshare_failures = 0
+                return result
+            except Exception as exc:
                 print(
-                    f"    ↳ akshare已连续失败 {_consecutive_akshare_failures} 次，"
-                    f"切换为上交所网页接口"
+                    f"    ⚠ akshare获取上交所份额数据失败 ({date_str}) "
+                    f"[第 {attempt}/{_AKSHARE_RETRY_PER_DATE} 次]: "
+                    f"{type(exc).__name__}: {exc}"
                 )
-            else:
-                print(f"    ↳ 尝试上交所网页接口备用...")
+                if attempt < _AKSHARE_RETRY_PER_DATE:
+                    time.sleep(0.8)
+
+        _consecutive_akshare_failures += 1
+        print(
+            f"    ↳ akshare当日重试后仍失败，连续失败计数={_consecutive_akshare_failures}，"
+            f"切换为上交所网页接口"
+        )
     else:
         print(f"    ℹ 使用上交所网页接口获取 {date_str} 份额数据")
 
@@ -239,11 +293,16 @@ def update_data() -> None:
         df_old = pd.read_csv(DATA_FILE, dtype={"基金代码": str, "日期": str})
         df_old["日期"] = df_old["日期"].astype(str)
 
-        # 找出所有 ETF 份额均缺失的日期，将其从已有数据中移除并重新获取
-        all_missing = df_old.groupby("日期")["基金份额(亿份)"].apply(lambda s: s.isna().all())
-        bad_dates = set(all_missing[all_missing].index)
+        # 若历史数据中某一天的份额或价格全为空，则整天删除并重新抓取。
+        missing_scale_dates = set(
+            df_old.groupby("日期")["基金份额(亿份)"].apply(lambda s: s.isna().all()).loc[lambda s: s].index
+        )
+        missing_price_dates = set(
+            df_old.groupby("日期")["ETF收盘价"].apply(lambda s: s.isna().all()).loc[lambda s: s].index
+        )
+        bad_dates = missing_scale_dates | missing_price_dates
         if bad_dates:
-            print(f"发现 {len(bad_dates)} 个份额数据缺失的日期，将重新获取：{sorted(bad_dates)}")
+            print(f"发现 {len(bad_dates)} 个数据缺失日期，将重新获取：{sorted(bad_dates)}")
             df_old = df_old[~df_old["日期"].isin(bad_dates)].copy()
 
         existing_dates = set(df_old["日期"].unique())
@@ -263,11 +322,10 @@ def update_data() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 2. 批量预取 ETF 历史收盘价（覆盖整个待取日期范围）
+    # 2. 按日期列表批量获取 ETF 单位净值（同花顺，用作收盘价代理）
     # ------------------------------------------------------------------
-    today_str = date.today().strftime("%Y%m%d")
-    print("\n正在批量获取ETF历史收盘价数据...")
-    etf_price_cache = fetch_etf_price_cache(dates_to_fetch[0], today_str)
+    print("\n正在批量获取ETF净值数据（同花顺）...")
+    etf_price_cache = fetch_etf_price_cache(dates_to_fetch)
 
     # ------------------------------------------------------------------
     # 3. 逐日获取上交所 ETF 份额数据
