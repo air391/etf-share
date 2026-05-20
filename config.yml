@@ -1,10 +1,10 @@
 # ETF 数据采集配置
 
 # 开始采集日期（格式 YYYYMMDD）
-start_date: "20260104"
+start_date: "20260103"
 
 # 采集时间间隔（天）
-interval_days: 3
+interval_days: 2
 
 # 数据输出文件路径
 data_file: "data/etf_scale.csv"
